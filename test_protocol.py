@@ -1,14 +1,19 @@
-"""Check scaling, fault preservation, corrupt packets, and reconnect behavior."""
+"""Check scaling, fault preservation, corrupt packets, reconnect behavior and the PC-power file."""
+from datetime import datetime
 import importlib.machinery
 import importlib.util
+import json
+from pathlib import Path
 import queue
 import struct
+import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
 import protocol
 import limits
+import pc_power
 
 
 def packet():
@@ -134,6 +139,28 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual([s['state'] for s in statuses], ['disconnected', 'live', 'stopped'])
         self.assertTrue(all(d.closed for d in devices))
         self.assertEqual(events.get_nowait()['state'], 'live')
+
+
+class PcPowerTests(unittest.TestCase):
+    def health(self, folder, **changes):
+        data = {'time': '2026-01-01T00:00:00+0000', 'connected': True, 'fresh': True,
+                'values': {'ac_output_power': 250}, 'field_age_seconds': {'ac_output_power': 1.0}}
+        data.update(changes)
+        path = Path(folder) / 'health.json'
+        path.write_text(json.dumps(data), encoding='utf-8')
+        return path, datetime.fromisoformat(data['time']).timestamp()
+
+    def test_unset_setting_never_reads_a_file(self):
+        self.assertEqual(pc_power.read_pc_power(None)['state'], 'disabled')
+
+    def test_fresh_and_stale_readings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path, now = self.health(folder)
+            self.assertEqual(pc_power.read_pc_power(path, now=now + 1)['watts'], 250.0)
+            self.assertEqual(pc_power.read_pc_power(path, now=now + 6)['state'], 'unavailable')
+            path, now = self.health(folder, connected=False)
+            self.assertEqual(pc_power.read_pc_power(path, now=now)['state'], 'unavailable')
+            self.assertEqual(pc_power.read_pc_power(Path(folder) / 'missing.json')['state'], 'unavailable')
 
 
 if __name__ == '__main__':

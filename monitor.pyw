@@ -244,7 +244,8 @@ class Monitor:
         hottest = f'{max(present_temps):.1f}' if present_temps else '—'
         cfg = self.connection.get('configuration', {}) if live else {}
         power_limit = min(s['cable_watts'], cfg.get('power_limit') or s['cable_watts']) if s else None
-        xs = [28 + 248 * i for i in range(5)] if PC_POWER_ENABLED else [142 + 248 * i for i in range(4)]
+        # Cards are 232 wide; either way they span the same 28..1252 band as the rest of the layout.
+        xs = [28 + 248 * i for i in range(5)] if PC_POWER_ENABLED else [28 + round(i * 992 / 3) for i in range(4)]
         if PC_POWER_ENABLED:
             pc_live = self.pc_power['state'] == 'live'
             pc_watts = f"{self.pc_power['watts']:.1f}" if pc_live else '—'

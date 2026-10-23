@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+*.log.*
+status.json
+status.tmp
+sensor-touch-check.json
+startup-backup/
+backups/
+reference/
+*.lnk
+.env
+.env.*
+*.key
+*.pem
+*.dpapi

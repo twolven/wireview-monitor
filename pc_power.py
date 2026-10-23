@@ -9,14 +9,17 @@ import os
 from pathlib import Path
 import time
 
-ENABLED = bool(os.environ.get('WIREVIEW_PC_POWER_FILE'))
-ENABLED = bool(os.environ.get('WIREVIEW_PC_POWER_FILE'))
-HEALTH_FILE = Path(os.environ.get('WIREVIEW_PC_POWER_FILE', ''))
+_SETTING = os.environ.get('WIREVIEW_PC_POWER_FILE', '').strip().strip('"')
+# Path('') would mean the current directory, so an unset variable must stay None.
+HEALTH_FILE = Path(_SETTING) if _SETTING else None
+ENABLED = HEALTH_FILE is not None
 MAX_AGE = 5.0
 
 
 def read_pc_power(path=HEALTH_FILE, now=None):
     unavailable = dict(state='unavailable', watts=None)
+    if path is None:
+        return dict(state='disabled', watts=None)
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
         timestamp = datetime.fromisoformat(data['time']).timestamp()

@@ -7,13 +7,13 @@ Snap. It also resizes down to 850 × 480 client pixels.
 The Windows title bar and border use the dashboard's dark background with light
 caption text, preserving standard dragging, resizing, minimize, and close controls.
 
-Launch **WireView Monitor** from the Start menu, double-click **Launch.lnk** in
-this folder, or run `Launch.ps1`. The isolated Python environment is included in
-`.venv`; the only installed dependency is pyserial 3.5.
-
-To recreate the isolated environment from the repository:
+Windows only (it uses the Win32 title-bar and DPI APIs). Create the isolated Python environment
+once with [uv](https://docs.astral.sh/uv/), then start it with `Launch.ps1`. The only dependency is
+pyserial 3.5.
 
 ```powershell
+git clone https://github.com/twolven/wireview-monitor
+cd wireview-monitor
 uv venv --python 3.12 .venv
 uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ./Launch.ps1
@@ -23,8 +23,10 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 
 - Optional PC Power card, left of Connector Power: AC output watts of an EcoFlow UPS, read from the
   `health.json` of the [BLE bridge](https://github.com/twolven/ecoflow-delta3-windows-ups/tree/main/ble).
-  Off by default; enable with `setx WIREVIEW_PC_POWER_FILE "C:\ProgramData\EcoFlowBLE\health.json"` and restart.
-  Readings older than five seconds show a dash. It opens no connection of its own.
+  Off by default (the other four cards then spread across the row); enable with
+  `setx WIREVIEW_PC_POWER_FILE "C:\ProgramData\EcoFlowBLE\health.json"` and restart the monitor. The value
+  covers every load on the EcoFlow's AC outputs, not just this PC. A disconnected bridge or a reading older
+  than five seconds shows a dash. It opens no connection of its own.
 - Connector power, supply voltage, total current, and hottest of all four sensors.
 - Five-minute power history with session minimum, arithmetic mean, and peak.
 - All six per-pin currents on the same scale, plus highest-to-lowest spread.
@@ -74,13 +76,14 @@ are prevented by a named mutex.
 
 `Install-Startup.ps1` registers the monitor under the HKCU Run key `WireViewMonitor` (`-Remove` undoes it). It
 does not touch any other program's startup entries. If you also run the stock WireView app, disable its
-autostart yourself: only one program can own the serial port.
+autostart yourself: only one program can own the serial port. (`Install-Startup.ps1` was written for this
+public release and has been syntax-checked, not run through a sign-in.)
 
 Keep the stock app for firmware and configuration work. Close this monitor first, then open the stock app.
 Onboard alarms and protection actions operate independently of either desktop application.
 
 The application has no network code, cloud integration, desktop capture, or app
-inspection. The live source is the WireView device, plus the optional PC-power file below.
+inspection. The live source is the WireView device, plus the optional PC-power file described above.
 Logs stay here in
 `monitor.log` (rotated at 1 MB) and `status.json` (latest sample only). These files
 include the device identity and readings; status updates every 500 ms.

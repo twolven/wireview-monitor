@@ -27,8 +27,9 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
   `setx WIREVIEW_PC_POWER_FILE "C:\ProgramData\EcoFlowBLE\health.json"` and restart the monitor. The value
   covers every load on the EcoFlow's AC outputs, not just this PC. A disconnected bridge or a reading older
   than five seconds shows a dash. It opens no connection of its own.
-- Connector power, supply voltage, total current, and hottest of all four sensors.
-- Five-minute power history with session minimum, arithmetic mean, and peak.
+- Connector power, supply voltage and total current. The separate hottest-sensor card was dropped as redundant with the temperature panel.
+- GPU board power (with its own 5-minute trace in the card) plus an 11-tile CPU / RAM / GPU panel (CPU temp, usage, power, clock; RAM used; GPU usage, VRAM, temp, voltage, core clock, memory clock) with 5-minute traces. The supply-voltage card and footer bar were removed; USB status, cable rating and fan duty sit in the header, and the four WireView temperatures have a 5-minute chart. These come from MSI Afterburner's read-only `MAHMSharedMemory` mapping via `sysmon.py`; Afterburner only needs to run in the tray (its hardware-monitor window can stay closed). If it is not running the tiles show dashes. Source names (`GPU2 ...`) assume the RTX 5090 is Afterburner's GPU 2.
+- Connector power and GPU board power each carry a five-minute trace in their card; connector power also shows session minimum, mean and peak. History is in memory only (not logged).
 - All six per-pin currents on the same scale, plus highest-to-lowest spread.
 - Input/output and both external temperatures. External 1 is labeled TG 12-pin;
   external 2 is GPU 12-pin, matching the common placement; edit `labels` in `monitor.pyw` if yours differs. Absent sensors display a dash.

@@ -15,6 +15,7 @@ import tkinter as tk
 from protocol import Device, fault_names, FAULTS
 from limits import pin_reference, load_level
 from pc_power import ENABLED as PC_POWER_ENABLED, read_pc_power
+from sysmon import Sensors
 
 BASE = Path(__file__).resolve().parent
 BG, PANEL, LINE = '#111418', '#1b2026', '#303842'
@@ -28,6 +29,26 @@ def publish_status(value):
     pending = BASE / 'status.tmp'
     pending.write_text(json.dumps(value, indent=2), encoding='utf-8')
     pending.replace(BASE / 'status.json')
+
+
+# (MSI Afterburner source, label, unit, decimals, trace range: (lo, hi) | 'max' | None=auto)
+TEMP_COLORS = (GREEN, '#7cc4ff', AMBER, '#d9a0ff')
+
+TILES = (
+    ('CPU usage', 'CPU USAGE', '%', 0, (0, 100)),
+    ('GPU2 usage', 'GPU USAGE', '%', 0, (0, 100)),
+    ('RAM usage', 'RAM USED', 'MB', 0, 'max'),
+    ('GPU2 memory usage', 'GPU VRAM', 'MB', 0, 'max'),
+    ('CPU clock', 'CPU CLOCK', 'MHz', 0, None),
+    ('GPU2 core clock', 'GPU CORE CLOCK', 'MHz', 0, None),
+    ('GPU2 memory clock', 'GPU MEM CLOCK', 'MHz', 0, None),
+    ('CPU temperature', 'CPU TEMP', '°C', 0, (0, 100)),
+    ('GPU2 temperature', 'GPU TEMP', '°C', 0, (0, 100)),
+    ('CPU power', 'CPU POWER', 'W', 1, None),
+    ('GPU2 voltage', 'GPU VOLTAGE', 'V', 3, None),
+)
+GROUPS = (('LOAD & MEMORY', 4), ('CLOCKS', 3), ('TEMPERATURE & POWER', 4))
+SAMPLED = tuple(name for name, *_ in TILES) + ('GPU2 power',)
 
 
 def worker(events, stop):
@@ -107,6 +128,12 @@ class Monitor:
         self.stop = threading.Event()
         self.sample = None
         self.pc_power = read_pc_power()
+        self.sensors = Sensors()
+        self.system = None
+        self.system_history = {name: collections.deque(maxlen=300) for name in SAMPLED}
+        self.next_system_sample = 0.0
+        self.temp_history = [collections.deque(maxlen=300) for _ in range(4)]
+        self.next_temp_sample = 0.0
         self.connection = dict(state='connecting')
         self.history = collections.deque(maxlen=1200)
         self.total = 0.0
@@ -160,12 +187,24 @@ class Monitor:
 
     def tick(self):
         self.pc_power = read_pc_power()
+        self.system = self.sensors.read()
+        now = time.time()
+        if self.system and now >= self.next_system_sample:
+            self.next_system_sample = now + 1.0
+            for name in SAMPLED:
+                if name in self.system:
+                    self.system_history[name].append((now, self.system[name]['value']))
         try:
             self.connection = self.events.get_nowait()
             if self.connection['state'] == 'live':
                 self.sample = self.connection['sample']
                 power = self.sample['power']
                 self.history.append((self.sample['timestamp'], power))
+                if now >= self.next_temp_sample:
+                    self.next_temp_sample = now + 1.0
+                    for trace, value in zip(self.temp_history, self.sample['temperatures']):
+                        if value is not None:
+                            trace.append((now, value))
                 self.total += power
                 self.count += 1
                 self.peak = max(self.peak, power)
@@ -181,9 +220,9 @@ class Monitor:
         self.draw()
 
     def clicked(self, event):
-        if event.x / self.sx > 1070 and 22 < event.y / self.sy < 65:
+        if event.x / self.sx > 1070 and 10 < event.y / self.sy < 52:
             self.toggle_topmost()
-        elif 590 < event.x / self.sx < 800 and 22 < event.y / self.sy < 65:
+        elif 590 < event.x / self.sx < 800 and 10 < event.y / self.sy < 52:
             self.toggle_safety()
 
     def toggle_safety(self):
@@ -207,12 +246,33 @@ class Monitor:
         self.canvas.create_line(x1*self.sx, y1*self.sy, x2*self.sx, y2*self.sy,
                                 fill=fill, width=max(1, width*self.scale))
 
-    def metric(self, x, title, value, unit, detail, color=TEXT):
-        self.rect(x, 95, 232, 113)
-        self.text(x+20, 110, title, 11, MUTED, weight='bold')
-        self.text(x+20, 132, value, 37, color, weight='bold')
-        self.text(x+212, 150, unit, 15, MUTED, anchor='ne')
-        self.text(x+20, 183, detail, 11, MUTED, width=int(192*self.sx))
+    def metric(self, x, title, value, unit, detail, color=TEXT, trace=None):
+        w = 294
+        self.rect(x, 62, w, 82)
+        self.text(x+16, 71, title, 10, MUTED, weight='bold')
+        self.text(x+16, 86, value, 30, color, weight='bold')
+        if trace:
+            self.text(x+112, 102, unit, 13, MUTED)
+        else:
+            self.text(x+w-16, 102, unit, 13, MUTED, anchor='ne')
+        self.text(x+16, 124, detail, 9, MUTED, width=int((130 if trace else 200)*self.sx))
+        if trace:
+            self.trace(trace, x+150, x+w-14, 76, 132, color=GREEN)
+
+    def trace(self, entries, left, right, top, bottom, low=0, high=None, color=GREEN, width=1.3):
+        """Five-minute line from (timestamp, value) pairs; baseline drawn at the bottom."""
+        now = time.time()
+        entries = [(t, v) for t, v in entries if t >= now-300]
+        self.rule(left, bottom, right, bottom, '#293039')
+        if len(entries) < 2:
+            return
+        peak = max(v for _, v in entries)
+        high = max(high if high is not None else peak*1.2, peak, low + 1e-6)
+        points = []
+        for t, v in entries:
+            points.extend(((left+(t-(now-300))/300*(right-left))*self.sx,
+                           (bottom-(v-low)/(high-low)*(bottom-top))*self.sy))
+        self.canvas.create_line(*points, fill=color, width=max(1, width*self.scale))
 
     def draw(self):
         if not hasattr(self, 'connection'):
@@ -225,115 +285,91 @@ class Monitor:
         live = bool(s and self.connection['state'] == 'live' and time.time()-s['timestamp'] < 2.5)
         ink = TEXT if live else MUTED
         state = 'LIVE' if live else ('CONNECTING' if s is None and self.connection['state'] == 'connecting' else 'DISCONNECTED')
-        self.text(28, 23, 'WIREVIEW', 25, TEXT, weight='bold')
-        self.text(29, 58, 'GPU CONNECTOR MONITOR', 10, MUTED, weight='bold')
-        self.rect(590, 25, 210, 38, PANEL)
-        self.text(695, 44, 'BACK TO MONITOR' if self.safety_view else 'LIMITS & PROTECTIONS', 10,
+        self.text(28, 10, 'WIREVIEW', 22, TEXT, weight='bold')
+        self.text(30, 40, 'GPU CONNECTOR + SYSTEM MONITOR', 9, MUTED, weight='bold')
+        self.rect(590, 10, 210, 38, PANEL)
+        self.text(695, 29, 'BACK TO MONITOR' if self.safety_view else 'LIMITS & PROTECTIONS', 10,
                   TEXT, anchor='center', weight='bold')
-        self.rect(1074, 25, 178, 38, '#263326' if self.topmost else PANEL)
-        self.text(1163, 44, 'PINNED ON TOP' if self.topmost else 'KEEP ON TOP', 10,
+        self.rect(1074, 10, 178, 38, '#263326' if self.topmost else PANEL)
+        self.text(1163, 29, 'PINNED ON TOP' if self.topmost else 'KEEP ON TOP', 10,
                   GREEN if self.topmost else MUTED, anchor='center', weight='bold')
-        self.text(1048, 30, state, 11, GREEN if live else AMBER, anchor='ne', weight='bold')
+        self.text(1048, 14, state, 11, GREEN if live else AMBER, anchor='ne', weight='bold')
         identity = f"{self.connection.get('port', 'USB')}   /   FW {self.connection.get('firmware', '—')}   /   2 Hz"
-        self.text(1048, 51, identity if live else 'Waiting for live USB telemetry', 10, MUTED, anchor='ne')
+        self.text(1048, 33, identity if live else 'Waiting for live USB telemetry', 10, MUTED, anchor='ne')
         power = f"{s['power']:.1f}" if s else '—'
-        voltage = f"{s['voltage']:.3f}" if s else '—'
         current = f"{s['current']:.2f}" if s else '—'
         temps = s['temperatures'] if s else [None]*4
-        present_temps = [t for t in temps if t is not None]
-        hottest = f'{max(present_temps):.1f}' if present_temps else '—'
         cfg = self.connection.get('configuration', {}) if live else {}
         power_limit = min(s['cable_watts'], cfg.get('power_limit') or s['cable_watts']) if s else None
-        # Cards are 232 wide; either way they span the same 28..1252 band as the rest of the layout.
-        xs = [28 + 248 * i for i in range(5)] if PC_POWER_ENABLED else [28 + round(i * 992 / 3) for i in range(4)]
+        pc_live = self.pc_power['state'] == 'live'
+        pc_watts = f"{self.pc_power['watts']:.1f}" if pc_live else '—'
+        gpu_power = self.system.get('GPU2 power') if self.system else None
+        gpu_watts = f"{gpu_power['value']:.1f}" if gpu_power else '—'
+        # Cards are 294 wide; with the optional PC power card off, the other three spread across the row.
+        xs = [28, 338, 648, 958] if PC_POWER_ENABLED else [28, 493, 958]
         if PC_POWER_ENABLED:
-            pc_live = self.pc_power['state'] == 'live'
-            pc_watts = f"{self.pc_power['watts']:.1f}" if pc_live else '—'
             self.metric(xs.pop(0), 'PC POWER', pc_watts, 'W', 'EcoFlow AC output' if pc_live else 'EcoFlow unavailable', TEXT if pc_live else MUTED)
-        self.metric(xs[0], 'CONNECTOR POWER', power, 'W', 'Measured at the 12V-2x6 cable', self.load_color(s['power'] if s else None, power_limit, live))
-        self.metric(xs[1], 'SUPPLY VOLTAGE', voltage, 'V', 'Device average voltage', ink)
+        self.metric(xs[0], 'GPU BOARD POWER', gpu_watts, 'W', 'Whole card · 5 min' if gpu_power else 'Afterburner not running',
+                    TEXT if gpu_power else MUTED, trace=self.system_history['GPU2 power'])
+        stats = f'MIN {self.minimum:.0f}  AVG {self.total/self.count:.0f}  PEAK {self.peak:.0f}' if self.count else '12V-2x6 cable'
+        self.metric(xs[1], 'CONNECTOR POWER', power, 'W', stats, self.load_color(s['power'] if s else None, power_limit, live),
+                    trace=self.history)
         self.metric(xs[2], 'TOTAL CURRENT', current, 'A', 'Sum of all six power pins', self.load_color(s['current'] if s else None, cfg.get('current_limit'), live))
-        hottest_color = self.load_color(max(present_temps) if present_temps else None, cfg.get('temperature_limit'), live)
-        self.metric(xs[3], 'HOTTEST SENSOR', hottest, '°C', 'Input, output, TG / GPU 12-pin', hottest_color)
+        if live:
+            note = ('Read-only USB monitoring  ·  500 ms / LOCAL',
+                    f"Cable rating {s['cable_watts']} W  ·  Fan duty {s['fan']}%")
+        elif s:
+            note = (f"LAST READINGS · {time.strftime('%H:%M:%S', time.localtime(s['timestamp']))}",
+                    'Reconnecting automatically')
+        else:
+            note = ('Connecting to WireView Pro II', 'Close other apps using its USB port')
+        self.text(250, 14, note[0], 10, MUTED)
+        self.text(250, 33, note[1], 10, MUTED)
         if self.safety_view:
             self.draw_safety(live)
         else:
-            self.draw_graph(live)
             self.draw_pins(live)
-            self.rect(28, 505, 776, 132)
-            self.text(48, 522, 'TEMPERATURES', 11, MUTED, weight='bold')
-            labels = ('INPUT', 'OUTPUT', 'TG 12-PIN', 'GPU 12-PIN')
-            for n, (label, value) in enumerate(zip(labels, temps)):
-                x = 48+n*188
-                if n:
-                    self.rule(x-12, 552, x-12, 617)
-                self.text(x, 553, '—' if value is None else f'{value:.1f}°', 25,
-                          self.load_color(value, cfg.get('temperature_limit'), live), weight='bold')
-                self.text(x, 595, label, 10, MUTED)
-        if live:
-            footer = f"Read-only USB monitoring    ·    Cable rating {s['cable_watts']} W    ·    Fan duty {s['fan']}%"
-        elif s:
-            footer = f"LAST READINGS · {time.strftime('%H:%M:%S', time.localtime(s['timestamp']))} · Reconnecting automatically"
-        else:
-            footer = 'Connecting to WireView Pro II · Close other apps using its USB port'
-        self.text(28, 655, footer, 10, MUTED)
-        self.text(1252, 655, '500 ms  /  LOCAL', 10, MUTED, anchor='ne')
+            self.draw_system()
+            self.draw_temps(live, temps, cfg)
 
-    def draw_graph(self, live):
-        self.rect(28, 226, 776, 263)
-        self.text(48, 244, 'POWER HISTORY', 11, MUTED, weight='bold')
-        stats = f'MIN {self.minimum:.1f}    AVG {self.total/self.count:.1f}    PEAK {self.peak:.1f} W' if self.count else 'Collecting samples'
-        self.text(784, 244, stats, 11, MUTED, anchor='ne')
-        self.text(48, 266, '5-minute view · Session min / average / peak', 9, MUTED)
-        left, right, top, bottom = 48, 745, 288, 452
+    def draw_temps(self, live, temps, cfg):
+        self.rect(820, 400, 432, 264)
+        self.text(840, 412, 'WIREVIEW TEMPERATURES', 11, MUTED, weight='bold')
+        self.text(1232, 412, '5-minute trace', 9, MUTED, anchor='ne')
+        labels = ('INPUT', 'OUTPUT', 'TG 12-PIN', 'GPU 12-PIN')
+        for n, (label, value) in enumerate(zip(labels, temps)):
+            x = 840 + n * 98
+            self.text(x, 432, '—' if value is None else f'{value:.1f}°', 19,
+                      self.load_color(value, cfg.get('temperature_limit'), live), weight='bold')
+            self.rect(x, 461, 8, 3, TEMP_COLORS[n])
+            self.text(x + 13, 456, label, 9, MUTED)
         now = time.time()
-        entries = [(t,p) for t,p in self.history if t >= now-300]
-        ceiling = max(100, math.ceil(max((p for _,p in entries), default=0)*1.15/50)*50)
-        for i in range(5):
-            y = top + (bottom-top)*i/4
+        entries = [[(t, v) for t, v in trace if t >= now-300] for trace in self.temp_history]
+        values = [v for trace in entries for _, v in trace]
+        left, right, top, bottom = 868, 1232, 484, 550
+        if values:
+            low, high = min(values), max(values)
+            if high - low < 8:
+                mid = (high + low) / 2
+                low, high = mid - 4, mid + 4
+            low, high = math.floor(low - 1), math.ceil(high + 1)
+        else:
+            low, high = 20, 40
+        for i in range(3):
+            y = top + (bottom - top) * i / 2
             self.rule(left, y, right, y, '#293039')
-            self.text(784, y, f'{ceiling*(1-i/4):.0f}', 10, MUTED, anchor='e')
-        points = []
-        previous = None
-        for timestamp, power in entries:
-            if previous is not None and timestamp-previous > 2.5:
-                if len(points) >= 4:
-                    self.canvas.create_line(*points, fill=GREEN, width=2*self.scale)
-                points = []
-            points.extend(((left+(timestamp-(now-300))/300*(right-left))*self.sx,
-                           (bottom-power/ceiling*(bottom-top))*self.sy))
-            previous = timestamp
-        if len(points) >= 4:
-            self.canvas.create_line(*points, fill=GREEN if live else MUTED, width=2*self.scale)
-        self.text(left, 465, '5 MIN AGO', 9, MUTED)
-        self.text(right, 465, 'NOW', 9, MUTED, anchor='ne')
-
-    def draw_pins(self, live):
-        self.rect(820, 226, 432, 411)
+            self.text(left - 6, y, f'{high - (high - low) * i / 2:.0f}°', 9, MUTED, anchor='e')
+        for n, trace in enumerate(entries):
+            if len(trace) < 2:
+                continue
+            points = []
+            for t, v in trace:
+                points.extend(((left + (t - (now - 300)) / 300 * (right - left)) * self.sx,
+                               (bottom - (v - low) / (high - low) * (bottom - top)) * self.sy))
+            self.canvas.create_line(*points, fill=TEMP_COLORS[n] if live else MUTED,
+                                    width=max(1, 1.5 * self.scale))
+        self.rule(840, 568, 1232, 568)
         s = self.sample
-        ink = TEXT if live else MUTED
-        self.text(840, 244, 'CURRENT PER PIN', 11, MUTED, weight='bold')
-        self.text(1232, 244, 'A', 11, MUTED, anchor='ne')
-        pins = s['pins'] if s else [None]*6
-        cfg = self.connection.get('configuration', {}) if live else {}
-        reference = pin_reference(cfg)
-        scale = max(10, math.ceil(reference*1.1), math.ceil(max((p['current'] for p in pins if p), default=0)))
-        for n, pin in enumerate(pins):
-            y = 284+n*35
-            self.text(840, y, f'0{n+1}', 11, MUTED)
-            self.rect(878, y+4, 265, 10, '#2a323b')
-            if pin:
-                color = self.load_color(pin['current'], reference, live)
-                self.rect(878, y+4, min(265, 265*pin['current']/scale), 10, color)
-            marker = 878+265*reference/scale
-            self.rule(marker, y+1, marker, y+17, RED if live else MUTED)
-            self.text(1232, y-3, f"{pin['current']:.3f}" if pin else '—', 17,
-                      self.load_color(pin['current'] if pin else None, reference, live), anchor='ne', weight='bold')
-        spread = max(p['current'] for p in pins)-min(p['current'] for p in pins) if s else None
-        self.text(840, 503, 'PIN SPREAD', 10, MUTED)
-        self.text(1232, 501, f'{spread:.3f} A' if spread is not None else '—', 12, ink, anchor='ne')
-        self.text(840, 524, f'Amber ≥{reference*.9:.2f} A · Red ≥{reference:g} A', 10, MUTED)
-        self.rule(840, 549, 1232, 549)
         active = s['active_faults'] if s else None
         logged = s['logged_faults'] if s else None
         if not live:
@@ -342,14 +378,77 @@ class Monitor:
             headline, color = 'DEVICE FAULT ACTIVE', RED
         else:
             headline, color = 'NO ACTIVE DEVICE FAULTS', GREEN
-        self.text(840, 565, headline, 11, color, weight='bold')
+        self.text(840, 582, headline, 11, color, weight='bold')
         detail = ', '.join(fault_names(active)) if live and active else ('No logged faults' if logged == 0 else 'Logged: '+', '.join(fault_names(logged or 0)))
         if not live:
             detail = str(self.connection.get('error', 'Waiting for device'))
-        self.text(840, 589, detail, 10, MUTED, width=int(390*self.sx))
+        self.text(840, 604, detail, 10, MUTED, width=int(390*self.sx))
+
+    def draw_system(self):
+        self.rect(28, 152, 776, 512)
+        self.text(48, 164, 'CPU · GPU · MEMORY', 11, MUTED, weight='bold')
+        source = 'MSI Afterburner · 1 Hz · 5-minute traces' if self.system else 'MSI Afterburner not running — start it (tray only) for CPU/GPU data'
+        self.text(784, 164, source, 10, AMBER if not self.system else MUTED, anchor='ne')
+        height = 137
+        n = 0
+        for row, (caption, count) in enumerate(GROUPS):
+            width = (752 - (count - 1) * 8) / count
+            block = 184 + row * 161
+            self.text(42, block, caption, 9, MUTED, weight='bold')
+            y = block + 16
+            for col in range(count):
+                name, label, unit, places, span = TILES[n]
+                n += 1
+                x = 40 + col * (width + 8)
+                reading = self.system.get(name) if self.system else None
+                self.rect(x, y, width, height, '#171c22')
+                self.text(x+12, y+10, label, 10, MUTED, weight='bold')
+                value = f"{reading['value']:.{places}f}" if reading else '—'
+                self.text(x+12, y+28, value, 24, TEXT if reading else MUTED, weight='bold')
+                self.text(x+width-12, y+40, unit, 10, MUTED, anchor='ne')
+                if span == 'max':
+                    low, high = 0, (reading['max'] if reading and reading['max'] > 0 else None)
+                elif span:
+                    low, high = span
+                else:
+                    low, high = 0, None
+                self.trace(self.system_history[name], x+12, x+width-12, y+72, y+height-14,
+                           low, high, GREEN if reading else MUTED, 1.6)
+
+    def draw_pins(self, live):
+        self.rect(820, 152, 432, 240)
+        s = self.sample
+        ink = TEXT if live else MUTED
+        self.text(840, 162, 'CURRENT PER PIN', 11, MUTED, weight='bold')
+        self.text(1232, 162, 'A', 11, MUTED, anchor='ne')
+        pins = s['pins'] if s else [None]*6
+        cfg = self.connection.get('configuration', {}) if live else {}
+        reference = pin_reference(cfg)
+        scale = max(10, math.ceil(reference*1.1), math.ceil(max((p['current'] for p in pins if p), default=0)))
+        for n, pin in enumerate(pins):
+            y = 188+n*29
+            self.text(840, y, f'0{n+1}', 11, MUTED)
+            self.rect(878, y+4, 265, 10, '#2a323b')
+            if pin:
+                color = self.load_color(pin['current'], reference, live)
+                self.rect(878, y+4, min(265, 265*pin['current']/scale), 10, color)
+            marker = 878+265*reference/scale
+            self.rule(marker, y+1, marker, y+17, RED if live else MUTED)
+            self.text(1232, y-2, f"{pin['current']:.3f}" if pin else '—', 15,
+                      self.load_color(pin['current'] if pin else None, reference, live), anchor='ne', weight='bold')
+        spread = max(p['current'] for p in pins)-min(p['current'] for p in pins) if s else None
+        self.rule(840, 368, 1232, 368)
+        self.text(840, 373, f'SPREAD  {spread:.3f} A' if spread is not None else 'SPREAD  —', 10, ink)
+        self.text(1232, 373, f'Amber ≥{reference*.9:.2f} A · Red ≥{reference:g} A', 9, MUTED, anchor='ne')
 
     def draw_safety(self, live):
-        self.rect(28, 226, 1224, 411)
+        before = set(self.canvas.find_all())
+        self.draw_safety_content(live)
+        for item in set(self.canvas.find_all()) - before:
+            self.canvas.move(item, 0, -74 * self.sy)
+
+    def draw_safety_content(self, live):
+        self.rect(28, 226, 1224, 512)
         cfg = self.connection.get('configuration', {}) if live else {}
         self.text(48, 245, 'DEVICE ALARM SETTINGS', 12, TEXT, weight='bold')
         self.text(48, 269, 'Read from WireView · Refreshed every 30 seconds', 10, MUTED)
@@ -390,6 +489,7 @@ class Monitor:
     def close(self):
         logging.info('Window closed')
         self.stop.set()
+        self.sensors.close()
         self.thread.join(timeout=2.5)
         self.root.destroy()
 

@@ -117,6 +117,10 @@ class Monitor:
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda _: self.draw())
         self.canvas.bind('<Button-1>', self.clicked)
+        self.canvas.bind('<Motion>', self.hovered)
+        self.canvas.bind('<Leave>', lambda _: self.hovered(None))
+        self.regions = []
+        self.hover = None
         root.bind('t', lambda _: self.toggle_topmost())
         root.bind('s', lambda _: self.toggle_safety())
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -257,15 +261,18 @@ class Monitor:
             self.text(x+w-16, 102, unit, 13, MUTED, anchor='ne')
         self.text(x+16, 124, detail, 9, MUTED, width=int((130 if trace else 200)*self.sx))
         if trace:
-            self.trace(trace, x+150, x+w-14, 76, 132, color=GREEN)
+            self.trace(trace, x+150, x+w-14, 76, 132, color=GREEN, unit=unit, title=title)
 
-    def trace(self, entries, left, right, top, bottom, low=0, high=None, color=GREEN, width=1.3):
+    def trace(self, entries, left, right, top, bottom, low=0, high=None, color=GREEN, width=1.3,
+              unit='', places=1, title=''):
         """Five-minute line from (timestamp, value) pairs; baseline drawn at the bottom."""
         now = time.time()
         entries = [(t, v) for t, v in entries if t >= now-300]
         self.rule(left, bottom, right, bottom, '#293039')
         if len(entries) < 2:
             return
+        self.regions.append(dict(left=left, right=right, top=top-24, bottom=bottom+8, now=now, unit=unit,
+                                 places=places, title=title, series=[('', color, entries)]))
         peak = max(v for _, v in entries)
         high = max(high if high is not None else peak*1.2, peak, low + 1e-6)
         points = []
@@ -274,13 +281,58 @@ class Monitor:
                            (bottom-(v-low)/(high-low)*(bottom-top))*self.sy))
         self.canvas.create_line(*points, fill=color, width=max(1, width*self.scale))
 
+    def hovered(self, event):
+        self.hover = (event.x, event.y) if event else None
+        self.draw_hover()
+
+    def draw_hover(self):
+        """Crosshair and tooltip for the trace under the mouse; redrawn after every frame."""
+        self.canvas.delete('hover')
+        if not self.hover:
+            return
+        mx, my = self.hover
+        for region in self.regions:
+            if (region['left']*self.sx <= mx <= region['right']*self.sx
+                    and region['top']*self.sy <= my <= region['bottom']*self.sy):
+                break
+        else:
+            return
+        left, right, now = region['left'], region['right'], region['now']
+        t = now - 300 + (mx/self.sx - left) / (right - left) * 300
+        rows, stamp = [], None
+        for name, color, entries in region['series']:
+            when, value = min(entries, key=lambda e: abs(e[0] - t))
+            if stamp is None or abs(when - t) < abs(stamp - t):
+                stamp = when
+            rows.append((name, color, value))
+        x = (left + (stamp - (now - 300)) / 300 * (right - left)) * self.sx
+        self.canvas.create_line(x, region['top']*self.sy + 20*self.sy, x, region['bottom']*self.sy,
+                                fill='#8892a0', dash=(3, 3), tags='hover')
+        lines = [time.strftime('%H:%M:%S', time.localtime(stamp)) + (f"  ·  {region['title']}" if region['title'] else '')]
+        lines += [f"{name + '  ' if name else ''}{value:.{region['places']}f} {region['unit']}" for name, _, value in rows]
+        size = max(9, int(10 * self.scale))
+        label = self.canvas.create_text(0, 0, text='\n'.join(lines), anchor='nw', fill=TEXT,
+                                        font=('Segoe UI', -size), tags='hover')
+        x0, y0, x1, y1 = self.canvas.bbox(label)
+        w, h = x1 - x0 + 16, y1 - y0 + 12
+        bx = x + 12 if x + 12 + w < self.canvas.winfo_width() else x - 12 - w
+        by = max(4, min(my - h - 8, self.canvas.winfo_height() - h - 4))
+        self.canvas.coords(label, bx + 8, by + 6)
+        box = self.canvas.create_rectangle(bx, by, bx + w, by + h, fill='#0d1013', outline=LINE, tags='hover')
+        self.canvas.tag_lower(box, label)
+
     def draw(self):
+        self._draw()
+        self.draw_hover()
+
+    def _draw(self):
         if not hasattr(self, 'connection'):
             return
         self.sx = self.canvas.winfo_width() / 1280
         self.sy = self.canvas.winfo_height() / 680
         self.scale = min(self.sx, self.sy)
         self.canvas.delete('all')
+        self.regions = []
         s = self.sample
         live = bool(s and self.connection['state'] == 'live' and time.time()-s['timestamp'] < 2.5)
         ink = TEXT if live else MUTED
@@ -359,6 +411,10 @@ class Monitor:
             y = top + (bottom - top) * i / 2
             self.rule(left, y, right, y, '#293039')
             self.text(left - 6, y, f'{high - (high - low) * i / 2:.0f}°', 9, MUTED, anchor='e')
+        if any(len(trace) >= 2 for trace in entries):
+            self.regions.append(dict(left=left, right=right, top=top - 10, bottom=bottom + 8, now=now, unit='°C',
+                                     places=1, title='WIREVIEW TEMPERATURES',
+                                     series=[(labels[n], TEMP_COLORS[n], trace) for n, trace in enumerate(entries) if trace]))
         for n, trace in enumerate(entries):
             if len(trace) < 2:
                 continue
@@ -413,7 +469,7 @@ class Monitor:
                 else:
                     low, high = 0, None
                 self.trace(self.system_history[name], x+12, x+width-12, y+72, y+height-14,
-                           low, high, GREEN if reading else MUTED, 1.6)
+                           low, high, GREEN if reading else MUTED, 1.6, unit=unit, places=places, title=label)
 
     def draw_pins(self, live):
         self.rect(820, 152, 432, 240)
